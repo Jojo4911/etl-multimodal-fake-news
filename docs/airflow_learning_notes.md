@@ -104,3 +104,29 @@ start_date=datetime(2026, 8, 20),
 ### Point de discussion pour le bilan mentor
 
 La confusion entre `logical_date` et heure d'exécution est l'erreur de lecture classique sur Airflow. Savoir qu'un run `@daily` du 3 mars tourne le 4 mars, et pouvoir dire pourquoi, est le marqueur de compréhension attendu sur ce sujet.
+
+## A4 : retries, timeouts, alerting, SLA
+
+Trois pannes distinctes, trois instruments distincts.
+
+| Situation                                  | Instrument               | Effet sur la tâche         |
+|--------------------------------------------|--------------------------|----------------------------|
+| Echec passager (réseau, base indisponible) | `retries`, `retry_delay` | Retente, finit verte       |
+| Ne se termine jamais                       | `execution_timeout`      | Tuée, passe en echec       |
+| Se termine mais trop tard                  | Alerte sur duree         | Reste verte, alerte a côté |
+
+**Le retry est une consequence de l'idempotence, pas une option de configuration.** Activer `retries` sur une tache non idempotente automatise la corruption. Avant l'`ON CONFLICT (id) DO UPDATE` du T11, un retry sur `load` aurait fait echouer la tache sur violation de la PRIMARY KEY, puis echouer chaque nouvelle tentative. Sans cle primaire, il aurait dupliqué.
+
+**Application au pipeline `etl_fake_news` :**
+
+- `extract` : depend de RFI, service externe. Echec passager probable. Candidat naturel au retry. Timeout applicatif déjà posé dans `requests`, un `execution_timeout` Airflow serait un second filet à un autre étage.
+- `transform` : lecture locale, règles déterministes. Echec definitif si échec. Le retry n'apporte rien.
+- `load` : mixte. Erreur de schema ou de type = definitif. Echec de connexion Postgres = passager, et c'est un des echecs transitoires les plus frequents en production. Retry pertinent, rendu sur par l'écriture idempotente.
+
+**Alerting** : sans `on_failure_callback`, un echec nocturne n'existe que dans l'UI. Le callback est le crochet ou brancher mail, Slack ou PagerDuty.
+
+**Point de version** : le mécanisme SLA d'Airflow 2 (`sla` sur l'operateur, `sla_miss_callback` sur le DAG) a ete retiré dans
+Airflow 3, remplacé par les Deadline Alerts. Les exemples en ligne visent majoritairement Airflow 2.
+
+**Périmetre** : aucun de ces parametres n'est implementé dans le DAG livré. Les 2 cases C3.1 et C3.2 sont couvertes sans eux. Cette note alimente le plan de monitoring du J9.
+
