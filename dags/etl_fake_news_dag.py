@@ -17,6 +17,7 @@ from airflow.sdk import DAG
 
 import extract_rss
 import transform
+import load
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +42,12 @@ def tache_transform(ti) -> str:
     return transform.run(input_path=chemin_brut, out_dir=str(PROCESSED_DIR))
 
 
-def tache_load(ti) -> None:
-    """Stub de chargement. L'écriture en base est traitée plus tard."""
+def tache_load(ti):
     chemin_csv = ti.xcom_pull(task_ids="transform")
-    with open(chemin_csv, encoding="utf-8") as fichier:
-        nb_lignes = sum(1 for _ in csv.DictReader(fichier))
-    logger.info("Chargement simule : %d lignes depuis %s", nb_lignes, chemin_csv)
+    if not chemin_csv:
+        raise ValueError("Aucun chemin CSV reçu de la tâche transform")
+    metriques = load.run(chemin_csv)
+    return metriques
 
 
 with DAG(

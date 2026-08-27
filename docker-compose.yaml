@@ -75,6 +75,12 @@ x-airflow-common:
     # for other purpose (development, test and especially production usage) build/extend Airflow image.
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
     PYTHONPATH: /opt/airflow/src
+    CHECKIT_PG_HOST: ${CHECKIT_PG_HOST:-postgres}
+    CHECKIT_PG_PORT: ${CHECKIT_PG_PORT:-5432}
+    CHECKIT_PG_USER: ${POSTGRES_USER:-airflow}
+    CHECKIT_PG_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+    CHECKIT_PG_DB: ${POSTGRES_DB:-airflow}
+    CHECKIT_PG_SCHEMA: ${CHECKIT_PG_SCHEMA:-checkit}
     # The following line can be used to set a custom config file, stored in the local config folder
     AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
   volumes:
@@ -96,9 +102,9 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
     volumes:
       - postgres-db-volume:/var/lib/postgresql/data
     healthcheck:
