@@ -158,3 +158,55 @@ Airflow 3, remplacé par les Deadline Alerts. Les exemples en ligne visent major
 
 **Perimètre** : aucune Connection créée, `load.py` inchangé, `FERNET_KEY` non modifiée. Cette note alimente la section 6 du rapport
 et le bilan mentor.
+
+## A6 : TaskFlow API contre opérateurs classiques
+
+### Ce que TaskFlow est réellement
+
+Ce n'est pas un autre moteur d'exécution. Le décorateur `@task` construit un opérateur Python à partir d'une fonction ordinaire. À l'exécution, on obtient exactement les mêmes opérateurs et les mêmes XCom qu'avec des `PythonOperator` écrits à la main. C'est une façon d'écrire, pas une façon d'exécuter.
+
+En Airflow 3, les décorateurs vivent au même endroit que le `DAG` : `from airflow.sdk import dag, task`.
+
+### Le mécanisme : le XComArg
+
+C'est le point central du bloc. Quand Airflow parse un fichier de DAG, aucune tâche ne s'exécute : il construit seulement le graphe. Le corps des fonctions décorées n'est donc pas exécuté à ce moment-là.
+
+Dans `chemin = extract()`, la variable `chemin` ne contient ni le résultat de la fonction, ni rien de vide. Elle contient un **XComArg** : un objet qui signifie « la future valeur de retour de la tâche `extract` ». Une référence, pas une donnée.
+
+Quand ce XComArg est passé à `transform(chemin)`, Airflow le reconnaît, en déduit que `transform` dépend de `extract`, et pose l'arête du graphe. La dépendance est donc établie **en avant**, à la construction du graphe, et non résolue à rebours. Ce n'est qu'à l'exécution qu'Airflow résout la référence, en effectuant le `xcom_pull` qu'on écrivait manuellement. 
+
+Formule à retenir : **TaskFlow ne fait pas transiter des données entre les tâches, il fait transiter des promesses de données, et les résout au moment de l'exécution.**
+
+### Ce que ça change, et ce que ça ne change pas
+
+Ce que ça change :
+
+- Les dépendances se déduisent du passage d'arguments. La ligne `extract >> transform >> load` devient inutile pour une chaîne linéaire de données.
+- XCom devient invisible. Plus de `ti.xcom_pull(task_ids="tache_transform")`, donc plus de clé textuelle à taper juste. La signature de la fonction remplace la chaîne de caractères.
+
+Ce que ça ne change pas :
+
+- Aucun gain ni aucune perte de performance. Ce sont les mêmes opérateurs et les mêmes XCom. Invoquer la performance dans un sens ou dans l'autre est une erreur d'analyse.
+- La gestion des valeurs absentes. Si `extract_rss.run()` retourne `None`, ce `None` traverse XCom et arrive comme argument de `transform`, qui doit toujours poser sa garde explicite. Point culturel appris ici : l'idiome Airflow pour ce cas n'est pas de retourner `None` mais de lever une `AirflowSkipException` dans la tâche amont, ce qui fait passer les tâches avales à l'état `skipped` au lieu de leur transmettre une valeur vide.
+
+Enfin, tout n'est pas décorable : les opérateurs des providers, les sensors et les opérateurs SQL n'ont pas d'équivalent TaskFlow. Un DAG de production mélange les deux styles, et la chaîne `>>` reste nécessaire pour exprimer une dépendance de contrôle, quand une tâche doit s'exécuter après une autre sans consommer sa sortie.
+
+### L'argument contre TaskFlow qui vaut au delà de ce projet
+
+Masquer une contrainte rend la contrainte plus facile à violer. `donnees = extract()` a exactement l'allure d'une affectation Python ordinaire alors que ce n'en est pas une. TaskFlow rend donc l'anti-pattern du gros payload en XCom, vu en A1, plus facile à commettre qu'avec un `xcom_push` explicite. C'est l'argument qu'un ingénieur avance contre TaskFlow pour une équipe junior.
+
+Corollaire sur la lisibilité, souvent mal formulée : TaskFlow est plus lisible pour qui connaît Python, et moins lisible pour qui cherche à comprendre ce qu'Airflow fait, puisque le mécanisme est justement caché.
+
+### Décision prise sur ce projet : pas de réécriture
+
+J'ai comparé les deux styles et gardé les `PythonOperator` classiques.
+
+TaskFlow produit les mêmes opérateurs et les mêmes XCom, il n'apporte aucun gain d'exécution : ce qu'il apporte, c'est de la concision, en déduisant les dépendances du passage d'arguments. Sur un DAG à trois tâches linéaires, ce gain est marginal, et la réécriture d'un code déjà validé sur deux exécutions consécutives introduit un risque de régression sans contrepartie.
+
+L'argument décisif est celui de la rubrique : les deux seules cases évaluées sont « mon DAG s'exécute sans erreur dans Airflow » et « mes tâches sont bien séparées ». Ni l'une ni l'autre ne dépend du style d'écriture. Une réécriture consommerait du budget en échange de zéro case gagnée.
+
+Si le DAG devait grossir à une dizaine de tâches avec du branchement, je basculerais : la chaîne de dépendances explicite devient alors la principale source d'erreurs, et c'est précisément ce que TaskFlow supprime.
+
+### À retester à froid en T14
+
+La notion de XComArg m'a été donnée, pas construite. Question de contrôle : « dans un DAG TaskFlow, que contient la variable `chemin` au moment où Airflow parse le fichier, et comment l'arête du graphe est-elle posée ? »
