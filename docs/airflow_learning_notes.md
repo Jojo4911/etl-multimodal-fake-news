@@ -210,3 +210,36 @@ Si le DAG devait grossir à une dizaine de tâches avec du branchement, je bascu
 ### À retester à froid en T14
 
 La notion de XComArg m'a été donnée, pas construite. Question de contrôle : « dans un DAG TaskFlow, que contient la variable `chemin` au moment où Airflow parse le fichier, et comment l'arête du graphe est-elle posée ? »
+
+## A7 : sensors et branchement conditionnel
+
+Deux façons de casser la ligne droite `extract >> transform >> load`. Le sensor répond à « la donnée n'est pas encore là », le branchement à « il ne faut pas faire la même chose à chaque run ». Aucun des deux n'est justifié dans le DAG livré : le flux RFI est disponible en permanence et le traitement est identique à chaque exécution.
+
+### Sensor
+
+Opérateur dont le seul travail est d'attendre qu'une condition fermée devienne vraie. Il ne calcule rien. C'est une tâche ordinaire du graphe, avec un état et un timeout.
+
+Pourquoi pas une boucle `while` dans un PythonOperator : Airflow perd la lisibilité de l'attente, la sémantique d'attente est réécrite à la main, et surtout le slot de worker reste occupé.
+
+Deux modes :
+- `poke`, le défaut : la tâche garde son slot et vérifie en boucle dans le même processus. Réactif, coûteux.
+- `reschedule` : la tâche vérifie une fois, rend son slot, passe en `up_for_reschedule` et revient `poke_interval` plus tard. Économe, latent.
+
+Arbitrage chiffrable : la latence gaspillée en `reschedule` vaut au pire un `poke_interval` entier. Avec `poke_interval=600`, un fichier apparu 3 secondes après la première vérification attend quand même 10 minutes.
+`poke` pour les attentes de quelques minutes, `reschedule` dès que l'attente se compte en heures.
+
+Panne caractéristique, le **sensor deadlock** : assez de sensors en `poke` pour saturer le pool de workers. Plus aucune tâche réelle ne démarre alors que le cluster est à 100 % d'occupation. Aggravé quand la condition attendue est produite par le même cluster : les sensors bloquent les slots dont dépend leur propre déblocage. Ne se résout pas seul.
+
+### Branchement
+
+`BranchPythonOperator`, ou `@task.branch` en TaskFlow : la fonction retourne le `task_id` de la tâche à exécuter. `ShortCircuitOperator` est le cas dégénéré, retour booléen.
+
+Point non intuitif : un branchement ne se contente pas de choisir une route, il **éteint activement l'autre**. Les tâches non retenues passent en `skipped`, état réel et visible, qui se propage à tout leur aval.
+
+### trigger_rule, la conséquence directe
+
+Une tâche de convergence placée après un branchement, avec les deux branches pour parents, ne s'exécute jamais avec les réglages par défaut : `all_success` propage le `skipped` du parent non emprunté. Rien n'est en erreur, la tâche est simplement ignorée.
+
+Correctif : `trigger_rule="none_failed_min_one_success"` sur la tâche de convergence. Aucun parent en échec, au moins un en succès, les parents `skipped` sont tolérés.
+
+Principe à retenir plutôt que la liste des valeurs : `trigger_rule` définit la condition d'entrée d'une tâche à partir de l'état de ses parents. `all_success` n'est qu'un défaut. Dès qu'un graphe cesse d'être une ligne droite, c'est le premier réglage à regarder.
