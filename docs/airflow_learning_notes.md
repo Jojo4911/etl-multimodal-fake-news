@@ -130,3 +130,31 @@ Airflow 3, remplacé par les Deadline Alerts. Les exemples en ligne visent major
 
 **Périmetre** : aucun de ces parametres n'est implementé dans le DAG livré. Les 2 cases C3.1 et C3.2 sont couvertes sans eux. Cette note alimente le plan de monitoring du J9.
 
+## A5 : Connections, Variables, secrets
+
+**Principe** : séparer la configuration du code. Le code décrit comment joindre une base, la configuration décrit laquelle.
+
+**Trois problèmes d'une chaine de connexion en dur dans un DAG :**
+1. Le secret part sur GitHub, et reste dans l'historique meme après suppression.
+2. Un DAG par environnement, donc deux fichiers à maintenir.
+3. Le plus grave : la rotation devient impossible en pratique. Changer le mot de passe demande une PR et un redeploiement, donc personne ne le change.
+
+**Configuration contre secret.** `CHECKIT_PG_HOST` vaut `postgres` : sa fuite n'a aucune consequence, c'est de la configuration. Le mot de passe donne l'accès : c'est un secret. Cycles de vie differents. C'est la raison d'être de deux mecanismes distincts dans Airflow.
+
+**Les quatre emplacements :**
+
+| Mecanisme                          | Usage                                | Limite                                          |
+|------------------------------------|--------------------------------------|-------------------------------------------------|
+| Variables d'environnement          | Config simple, portable hors Airflow | Visible dans le conteneur, exige un `down`/`up` |
+| Airflow Variables                  | Config qui bouge, editable en UI     | Pas structuree pour un accès externe            |
+| Airflow Connections                | Acces externes, mot de passe chiffré | Depend de la `FERNET_KEY`                       |
+| Backend de secrets (Vault, AWS SM) | Production                           | Infrastructure dedièe                           |
+
+**Ce que le chiffrement d'une Connection protege reellement.** La base de metadonnées d'Airflow est ici le même Postgres que la table `publications`. La `FERNET_KEY` vit dans l'environnement des conteneurs Airflow, a côté. Le chiffrement protège donc contre un accès au fichier de base seul : sauvegarde, dump, disque recuperé. Il ne protège pas contre une compromission de la machine. Protection AU REPOS, pas contre un attaquant déjà dans l'infrastructure.
+
+**FERNET_KEY vide sur cette stack.** Comportement par defaut du Docker Compose, pas un défaut du projet. Consequence concrète : Airflow ne peut pas chiffrer les mots de passe de Connections, donc le mecanisme de Connections est inutilisable en l'état.
+
+**Choix retenu et sa defense.** Identifiants dans le `.env`, injectés par Compose, lus par `os.environ`. Justifié par le perimètre (zero case), par l'infrastructure (pas de `FERNET_KEY`), et par la portabilité (`load.py` testable hors Airflow). Limite assumée : pas de rotation. En production, Connection Airflow, puis backend de secrets a l'échelle.
+
+**Perimètre** : aucune Connection créée, `load.py` inchangé, `FERNET_KEY` non modifiée. Cette note alimente la section 6 du rapport
+et le bilan mentor.
