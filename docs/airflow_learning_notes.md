@@ -104,3 +104,57 @@ start_date=datetime(2026, 8, 20),
 ### Point de discussion pour le bilan mentor
 
 La confusion entre `logical_date` et heure d'exécution est l'erreur de lecture classique sur Airflow. Savoir qu'un run `@daily` du 3 mars tourne le 4 mars, et pouvoir dire pourquoi, est le marqueur de compréhension attendu sur ce sujet.
+
+## A4 : retries, timeouts, alerting, SLA
+
+Trois pannes distinctes, trois instruments distincts.
+
+| Situation                                  | Instrument               | Effet sur la tâche         |
+|--------------------------------------------|--------------------------|----------------------------|
+| Echec passager (réseau, base indisponible) | `retries`, `retry_delay` | Retente, finit verte       |
+| Ne se termine jamais                       | `execution_timeout`      | Tuée, passe en echec       |
+| Se termine mais trop tard                  | Alerte sur duree         | Reste verte, alerte a côté |
+
+**Le retry est une consequence de l'idempotence, pas une option de configuration.** Activer `retries` sur une tache non idempotente automatise la corruption. Avant l'`ON CONFLICT (id) DO UPDATE` du T11, un retry sur `load` aurait fait echouer la tache sur violation de la PRIMARY KEY, puis echouer chaque nouvelle tentative. Sans cle primaire, il aurait dupliqué.
+
+**Application au pipeline `etl_fake_news` :**
+
+- `extract` : depend de RFI, service externe. Echec passager probable. Candidat naturel au retry. Timeout applicatif déjà posé dans `requests`, un `execution_timeout` Airflow serait un second filet à un autre étage.
+- `transform` : lecture locale, règles déterministes. Echec definitif si échec. Le retry n'apporte rien.
+- `load` : mixte. Erreur de schema ou de type = definitif. Echec de connexion Postgres = passager, et c'est un des echecs transitoires les plus frequents en production. Retry pertinent, rendu sur par l'écriture idempotente.
+
+**Alerting** : sans `on_failure_callback`, un echec nocturne n'existe que dans l'UI. Le callback est le crochet ou brancher mail, Slack ou PagerDuty.
+
+**Point de version** : le mécanisme SLA d'Airflow 2 (`sla` sur l'operateur, `sla_miss_callback` sur le DAG) a ete retiré dans
+Airflow 3, remplacé par les Deadline Alerts. Les exemples en ligne visent majoritairement Airflow 2.
+
+**Périmetre** : aucun de ces parametres n'est implementé dans le DAG livré. Les 2 cases C3.1 et C3.2 sont couvertes sans eux. Cette note alimente le plan de monitoring du J9.
+
+## A5 : Connections, Variables, secrets
+
+**Principe** : séparer la configuration du code. Le code décrit comment joindre une base, la configuration décrit laquelle.
+
+**Trois problèmes d'une chaine de connexion en dur dans un DAG :**
+1. Le secret part sur GitHub, et reste dans l'historique meme après suppression.
+2. Un DAG par environnement, donc deux fichiers à maintenir.
+3. Le plus grave : la rotation devient impossible en pratique. Changer le mot de passe demande une PR et un redeploiement, donc personne ne le change.
+
+**Configuration contre secret.** `CHECKIT_PG_HOST` vaut `postgres` : sa fuite n'a aucune consequence, c'est de la configuration. Le mot de passe donne l'accès : c'est un secret. Cycles de vie differents. C'est la raison d'être de deux mecanismes distincts dans Airflow.
+
+**Les quatre emplacements :**
+
+| Mecanisme                          | Usage                                | Limite                                          |
+|------------------------------------|--------------------------------------|-------------------------------------------------|
+| Variables d'environnement          | Config simple, portable hors Airflow | Visible dans le conteneur, exige un `down`/`up` |
+| Airflow Variables                  | Config qui bouge, editable en UI     | Pas structuree pour un accès externe            |
+| Airflow Connections                | Acces externes, mot de passe chiffré | Depend de la `FERNET_KEY`                       |
+| Backend de secrets (Vault, AWS SM) | Production                           | Infrastructure dedièe                           |
+
+**Ce que le chiffrement d'une Connection protege reellement.** La base de metadonnées d'Airflow est ici le même Postgres que la table `publications`. La `FERNET_KEY` vit dans l'environnement des conteneurs Airflow, a côté. Le chiffrement protège donc contre un accès au fichier de base seul : sauvegarde, dump, disque recuperé. Il ne protège pas contre une compromission de la machine. Protection AU REPOS, pas contre un attaquant déjà dans l'infrastructure.
+
+**FERNET_KEY vide sur cette stack.** Comportement par defaut du Docker Compose, pas un défaut du projet. Consequence concrète : Airflow ne peut pas chiffrer les mots de passe de Connections, donc le mecanisme de Connections est inutilisable en l'état.
+
+**Choix retenu et sa defense.** Identifiants dans le `.env`, injectés par Compose, lus par `os.environ`. Justifié par le perimètre (zero case), par l'infrastructure (pas de `FERNET_KEY`), et par la portabilité (`load.py` testable hors Airflow). Limite assumée : pas de rotation. En production, Connection Airflow, puis backend de secrets a l'échelle.
+
+**Perimètre** : aucune Connection créée, `load.py` inchangé, `FERNET_KEY` non modifiée. Cette note alimente la section 6 du rapport
+et le bilan mentor.
